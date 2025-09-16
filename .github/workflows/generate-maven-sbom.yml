@@ -1,0 +1,89 @@
+name: Generate Maven SBOM
+
+# TODO: when do we want to generate sboms (regular or with -dev suffix)?
+# - on release (maven_release.yml)
+# - on workflow dispatch (for testing and manual creation)
+# - on certain push events? E.g.
+#   Snapshot releases (maven_deploy_*.yml), pom.xml changes?
+on:
+  release:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version'
+        # TODO: Do we need this? It seems redundant and prone to inconsistency
+        # with "Use workflow from" GitHub UI, to pick a branch or tag.
+        default: 'main'
+        required: true
+  # TODO: remove or constrain
+  push:
+
+# Product specific settings
+env:
+  # TODO: Java version and distro needs manual sync with maven_release.yml
+  JAVA_VERSION: '17'
+  JAVA_DISTRO: 'temurin'
+  # TODO: consider removing
+  PRODUCT_PATH: './'
+  # TODO: needs manual update (not picked up by Dependabot)
+  PLUGIN_VERSION: '2.9.1'
+  # TODO: make recommendation in handbook, when to use each sbom type
+  SBOM_TYPE: 'makeAggregateBom'
+
+permissions:
+  contents: read
+
+jobs:
+  generate-sbom:
+    runs-on: ubuntu-latest
+    outputs:
+      project-version: ${{ steps.version.outputs.PROJECT_VERSION }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        # TODO: why not use defaults?
+        # - default fetch-depth: 1 should be faster and enough
+        # - default ref for all events should be fine
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.inputs.version }}
+          persist-credentials: false
+      - name: Setup Java SDK
+        uses: actions/setup-java@dded0888837ed1f317902acf8a20df0ad188d165 # v5.0.0
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: ${{ env.JAVA_DISTRO }}
+
+        # Added `skipNotDeployed=false` to avoid
+        # "Skipping CycloneDX goal, because module skips deploy"
+        # TODO: is this correct for all bom generation cases?
+      - name: Generate sbom
+        run: |
+          mvn org.cyclonedx:cyclonedx-maven-plugin:2.9.1:makeAggregateBom \
+            -Dcyclonedx.skipNotDeployed=false
+
+      # TODO: This step is less straight-forward than the rest
+      # Improvement ideas:
+      # - otterdog could parse .metadata.component.version by itself
+      # - dev vs. no-dev release could be more explicit
+      # TODO: should we use the short commit id as unique suffix instead of dev
+      - name: Extract product version
+        id: version
+        shell: bash
+        run: |
+          event="${{ github.event_name }}"
+          ref="${{ github.ref }}"
+          input="${{ github.event.inputs.version }}"
+          VERSION="$(jq -r '.metadata.component.version' < ./${{ env.PRODUCT_PATH }}/target/bom.json)"
+          if [[ "$event" == "push" && "$ref" == refs/heads/* ]] || \
+            [[ "$event" == "workflow_dispatch" && ! "$input" =~ ^v ]]; then
+            VERSION="${VERSION}@dev"
+          fi
+          echo "PROJECT_VERSION=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Upload sbom
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: sbom
+          path: ${{ env.PRODUCT_PATH }}/target/bom.json
