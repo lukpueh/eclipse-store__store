@@ -8,6 +8,15 @@ on:
   release:
     types: [created]
 
+  workflow_dispatch:
+
+env:
+  VERSION: ${{ github.ref_name }}
+  # Used to skip publishing, when testing via workflow_dispatch
+  IS_RELEASE: ${{ github.event == 'release'}}
+  # Used to skip setting the version, when testing the workflow on a branch
+  IS_TAG: ${{ github.ref_type == 'tag' }}
+
 jobs:
   publish:
     runs-on: ubuntu-latest
@@ -23,15 +32,41 @@ jobs:
           server-username: MAVEN_USERNAME
           server-password: MAVEN_PASSWORD
       - name: Maven change version
-        run: mvn versions:set -DnewVersion=${{ github.event.release.tag_name }} --batch-mode
+        if: env.IS_TAG == 'true'
+        run: mvn versions:set -DnewVersion=${VERSION} --batch-mode
       - name: Maven change serializer version
-        run:  mvn versions:set-property -Dproperty=eclipse.serializer.version -DnewVersion=${{ github.event.release.tag_name }}
+        if: env.IS_TAG == 'true'
+        run:  mvn versions:set-property -Dproperty=eclipse.serializer.version -DnewVersion=${VERSION}
       - name: Make a release
-        run: mvn -Pdeploy -Pproduction --no-transfer-progress --batch-mode clean deploy
+        run: |
+          echo "Deploying version: ${VERSION}"
+          opts="-Pdeploy -Pproduction --no-transfer-progress --batch-mode"
+
+          if [ ${IS_RELEASE} == 'false' ]; then
+            echo "NOTE: Publishing and signing skipped"
+            opts="${opts} -DskipPublishing=true -Dgpg.skip"
+          fi
+
+          eval "mvn ${opts} clean deploy"
+
         env:
           MAVEN_USERNAME: ${{ secrets.CENTRAL_SONATYPE_TOKEN_USERNAME }}
           MAVEN_PASSWORD: ${{ secrets.CENTRAL_SONATYPE_TOKEN_PASSWORD }}
           MAVEN_GPG_PASSPHRASE: ${{ secrets.ORG_GPG_PASSPHRASE }}
           MAVEN_GPG_KEY: ${{ secrets.ORG_GPG_PRIVATE_KEY }}
+      - name: Upload SBOM
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: sbom
+          path: target/sbom/Eclipse-Store-Sbom.json
 
-
+  store-sbom-data: # stores sbom and metadata in a predefined format for otterdog to pick up
+    needs: ['publish']
+    uses: eclipse-csi/workflows/.github/workflows/store-sbom-data.yml@main
+    with:
+      projectName: 'store'
+      # Cannot use env.VERSION (see see actions/runner#2372)
+      projectVersion: ${{ github.ref_name }}
+      bomArtifact: 'sbom'
+      bomFilename: 'Eclipse-Store-Sbom.json'
+      parentProject: '0a48ad69-bb92-4881-b35e-450e4f7264dc'
